@@ -1,3 +1,7 @@
+## 0.24.0-mod.0 / 2023-05-16
+
+* [CHANGE] provide a custom mod version
+
 ## 0.24.0 / 2023-05-16
 
 * [CHANGE] Make Proxy Connect Headers consistent with Prometheus #1008

@@ -64,6 +64,8 @@ workflows:
             branches:
               only: master
       - prometheus/publish_release:
+          docker_hub_organization: chanjarster
+          quay_io_organization: ""
           context: org-context
           requires:
             - test
