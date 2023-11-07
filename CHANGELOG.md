@@ -1,6 +1,10 @@
+## 0.24.0-mod.1 / 2023-05-16
+
+* [CHANGE] Add enhanced management API
+
 ## 0.24.0-mod.0 / 2023-05-16
 
-* [CHANGE] provide a custom mod version
+* [CHANGE] Provide a custom mod version
 
 ## 0.24.0 / 2023-05-16
 

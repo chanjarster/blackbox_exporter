@@ -28,6 +28,7 @@ import (
 	"syscall"
 
 	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -41,6 +42,8 @@ import (
 
 	"github.com/prometheus/blackbox_exporter/config"
 	"github.com/prometheus/blackbox_exporter/prober"
+	"github.com/prometheus/blackbox_exporter/sidecar"
+	bbweb "github.com/prometheus/blackbox_exporter/web"
 )
 
 var (
@@ -236,6 +239,12 @@ func run() int {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write(c)
 	})
+
+	// EXTENSION: sidecar API
+	sidecarSvc := sidecar.New(log.With(logger, "component", "sidecar"), *configFile)
+	sidecarHandler := bbweb.NewSidecarHandler(log.With(logger, "handler", "sidecar"), sidecarSvc, reloadCh)
+	http.HandleFunc(path.Join(*routePrefix, "/-/sidecar/config"), sidecarHandler.UpdateConfig)
+	http.HandleFunc(path.Join(*routePrefix, "/-/sidecar/last-update-ts"), sidecarHandler.GetLastUpdateTs)
 
 	srv := &http.Server{}
 	srvc := make(chan struct{})
