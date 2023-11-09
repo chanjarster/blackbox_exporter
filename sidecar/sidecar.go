@@ -16,6 +16,7 @@ package sidecar
 import (
 	"context"
 	"fmt"
+	fsutil "github.com/prometheus/blackbox_exporter/sidecar/utils/fs"
 	"os"
 	"strings"
 	"sync"
@@ -100,20 +101,21 @@ func (s *sidecarService) UpdateConfigReload(ctx context.Context, cmd *UpdateConf
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	oldConfigYaml, err := s.readConfigFile()
-	if err != nil {
-		return err
-	}
-
 	var reloadErr error
 	defer func() {
-		if reloadErr != nil {
-			if err := s.writeConfigFile(oldConfigYaml); err != nil {
-				level.Error(s.logger).Log("err", errors.Wrapf(err, "Recover config file error").Error())
-			}
+		if reloadErr == nil {
+			s.lastUpdateTs = time.Now()
+			// 没有出错
+			s.printErr(s.cleanBackupPromConfigFile())
+		} else {
+			// 出错了
+			s.printErr(s.restorePromConfigFile())
 		}
 	}()
 
+	if reloadErr = s.backupPromConfigFile(); reloadErr != nil {
+		return reloadErr
+	}
 	// 更新配置文件
 	if reloadErr = s.writeConfigFile(cmd.Yaml); reloadErr != nil {
 		// 恢复旧文件
@@ -121,9 +123,7 @@ func (s *sidecarService) UpdateConfigReload(ctx context.Context, cmd *UpdateConf
 	}
 
 	// 指示 Blackbox reload 配置文件
-	if reloadErr = s.doReload(reloadCh); reloadErr == nil {
-		s.lastUpdateTs = time.Now()
-	}
+	reloadErr = s.doReload(reloadCh)
 	return reloadErr
 }
 
@@ -141,6 +141,32 @@ func (s *sidecarService) writeConfigFile(configYaml string) error {
 		return errors.Wrapf(err, "Write config file %q failed", s.configFile)
 	}
 	return nil
+}
+
+func (s *sidecarService) backupPromConfigFile() error {
+	return fsutil.BackupFile(s.configFile)
+}
+
+func (s *sidecarService) cleanBackupPromConfigFile() error {
+	return fsutil.CleanBackupFile(s.configFile)
+}
+
+func (s *sidecarService) restorePromConfigFile() error {
+	return fsutil.RestoreFile(s.configFile)
+}
+
+func (s *sidecarService) printErr(err error) {
+	if err == nil {
+		return
+	}
+
+	if errList, ok := err.(fsutil.ErrorList); ok {
+		for _, err2 := range errList {
+			level.Warn(s.logger).Log("err", err2)
+		}
+	} else {
+		level.Warn(s.logger).Log("err", err)
+	}
 }
 
 func (s *sidecarService) doReload(reloadCh chan chan error) error {

@@ -14,17 +14,16 @@
 package sidecar
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"github.com/pkg/errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/pkg/errors"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_sidecarService_UpdateConfigReload(t *testing.T) {
@@ -38,12 +37,14 @@ func Test_sidecarService_UpdateConfigReload(t *testing.T) {
 	defer os.RemoveAll(testDir)
 
 	configFile := filepath.Join(testDir, "blackbox.yml")
-	testConfigYaml, err := os.ReadFile("../test-data/blackbox.yml")
+	templateConfigYaml, err := os.ReadFile("../test-data/blackbox.yml")
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	err = os.WriteFile(configFile, testConfigYaml, 0o666)
+
+	// 准备一下文件
+	err = os.WriteFile(configFile, templateConfigYaml, 0o666)
 	if err != nil {
 		t.Error(err)
 		return
@@ -54,75 +55,56 @@ func Test_sidecarService_UpdateConfigReload(t *testing.T) {
 		configFile: configFile,
 	}
 
-	if !reflect.DeepEqual(time.Time{}, s.GetLastUpdateTs()) {
-		t.Error("GetLastUpdateTs() not zero")
-		return
-	}
+	require.Equal(t, time.Time{}, s.GetLastUpdateTs(), "should not be updated")
 
-	cmd := &UpdateConfigCmd{
-		Yaml: `
+	t.Run("success", func(t *testing.T) {
+
+		cmd := &UpdateConfigCmd{
+			Yaml: `
 modules:
   http_2xx:
     prober: http
     http:
       preferred_ip_protocol: "ip4"
 `,
-	}
+		}
 
-	reloadCh := make(chan chan error)
-	go func() {
-		ch := <-reloadCh
-		ch <- nil
-	}()
-	err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	if reflect.DeepEqual(time.Time{}, s.GetLastUpdateTs()) {
-		t.Error("GetLastUpdateTs() still zero")
-		return
-	}
+		reloadCh := make(chan chan error)
+		go func() {
+			ch := <-reloadCh
+			ch <- nil
+		}()
+		require.NoError(t, s.UpdateConfigReload(context.TODO(), cmd, reloadCh))
+		require.NotEqual(t, time.Time{}, s.GetLastUpdateTs(), "GetLastUpdateTs() still zero")
+	})
+
 }
 
 func Test_sidecarService_UpdateConfigReload_FailRecover(t *testing.T) {
-	requireNoError := func(t *testing.T, err error) bool {
-		if err != nil {
-			t.Error(err)
-			return false
-		}
-		return true
-	}
 
 	testDir, err := os.MkdirTemp("", "prom-config")
-	if !requireNoError(t, err) {
-		return
-	}
+	require.NoError(t, err)
 
 	fmt.Println("test dir:", testDir)
 	defer os.RemoveAll(testDir)
 
 	configFile := filepath.Join(testDir, "blackbox.yml")
-	beforeUpdateConfigYaml, err := os.ReadFile("../test-data/blackbox.yml")
-	if !requireNoError(t, err) {
-		return
-	}
-	err = os.WriteFile(configFile, beforeUpdateConfigYaml, 0o666)
-	if !requireNoError(t, err) {
-		return
-	}
+	templateConfigYaml, err := os.ReadFile("../test-data/blackbox.yml")
+	require.NoError(t, err)
+
+	// 预先准备一下文件
+	err = os.WriteFile(configFile, templateConfigYaml, 0o666)
+	require.NoError(t, err)
 
 	s := &sidecarService{
 		logger:     log.NewLogfmtLogger(os.Stdout),
 		configFile: configFile,
 	}
 
-	if !reflect.DeepEqual(time.Time{}, s.GetLastUpdateTs()) {
-		t.Error("GetLastUpdateTs() not zero")
-		return
-	}
+	require.Equal(t, time.Time{}, s.GetLastUpdateTs(), "should not be updated")
 
-	{
+	t.Run("bad yaml", func(t *testing.T) {
+
 		cmd := &UpdateConfigCmd{
 			Yaml: `
 modules:
@@ -140,25 +122,17 @@ modules:
 			ch <- nil
 		}()
 		err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
-		if err == nil {
-			t.Error("UpdateConfigReload should return err")
-			return
-		}
-		if !reflect.DeepEqual(time.Time{}, s.GetLastUpdateTs()) {
-			t.Error("GetLastUpdateTs() should not be updated")
-			return
-		}
+		require.Error(t, err, "UpdateConfigReload should return err")
+		require.Equal(t, time.Time{}, s.GetLastUpdateTs(), "GetLastUpdateTs() should not be updated")
 
 		afterUpdateConfigYaml, err := os.ReadFile("../test-data/blackbox.yml")
-		if !requireNoError(t, err) {
-			return
-		}
-		if !bytes.Equal(afterUpdateConfigYaml, beforeUpdateConfigYaml) {
-			t.Error("UpdateConfigReload fail should keep old file unchanged")
-		}
-	}
+		require.NoError(t, err)
+		require.Equal(t, templateConfigYaml, afterUpdateConfigYaml, "UpdateConfigReload fail should keep old file unchanged")
 
-	{
+	})
+
+	t.Run("reload error happen", func(t *testing.T) {
+
 		cmd := &UpdateConfigCmd{
 			Yaml: `
 modules:
@@ -172,25 +146,15 @@ modules:
 		reloadCh := make(chan chan error)
 		go func() {
 			ch := <-reloadCh
-			ch <- errors.New("blah blah")
+			ch <- errors.New("on purpose")
 		}()
 		err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
-		if err == nil {
-			t.Error("UpdateConfigReload should return err")
-			return
-		}
-		if !reflect.DeepEqual(time.Time{}, s.GetLastUpdateTs()) {
-			t.Error("GetLastUpdateTs() should not be updated")
-			return
-		}
+		require.Error(t, err, "UpdateConfigReload should return err")
+		require.Equal(t, time.Time{}, s.GetLastUpdateTs(), "GetLastUpdateTs() should not be updated")
 
 		afterUpdateConfigYaml, err := os.ReadFile("../test-data/blackbox.yml")
-		if !requireNoError(t, err) {
-			return
-		}
-		if !bytes.Equal(afterUpdateConfigYaml, beforeUpdateConfigYaml) {
-			t.Error("UpdateConfigReload fail should keep old file unchanged")
-		}
-	}
+		require.NoError(t, err)
+		require.Equal(t, templateConfigYaml, afterUpdateConfigYaml, "UpdateConfigReload fail should keep old file unchanged")
+	})
 
 }
