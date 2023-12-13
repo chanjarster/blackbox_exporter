@@ -210,7 +210,7 @@ modules:
 		require.Equal(t, "", rt.ZoneId)
 		require.Equal(t, time.Time{}, rt.LastUpdateTs)
 
-		afterUpdateConfigYaml, err := os.ReadFile("../blackbox.yml")
+		afterUpdateConfigYaml, err := os.ReadFile(filepath.Join("..", "blackbox.yml"))
 		require.NoError(t, err)
 		require.Equal(t, templateConfigYaml, afterUpdateConfigYaml, "UpdateConfigReload fail should keep old file unchanged")
 
@@ -241,7 +241,7 @@ modules:
 		require.Equal(t, "", rt.ZoneId)
 		require.Equal(t, time.Time{}, rt.LastUpdateTs)
 
-		afterUpdateConfigYaml, err := os.ReadFile("../blackbox.yml")
+		afterUpdateConfigYaml, err := os.ReadFile(filepath.Join("..", "blackbox.yml"))
 		require.NoError(t, err)
 		require.Equal(t, templateConfigYaml, afterUpdateConfigYaml, "UpdateConfigReload fail should keep old file unchanged")
 	})
