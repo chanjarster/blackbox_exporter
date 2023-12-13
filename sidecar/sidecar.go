@@ -15,9 +15,9 @@ package sidecar
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	fsutil "github.com/prometheus/blackbox_exporter/sidecar/utils/fs"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -32,11 +32,15 @@ import (
 )
 
 type UpdateConfigCmd struct {
-	Yaml string `json:"yaml"`
+	ZoneId string `json:"zone_id"`
+	Yaml   string `json:"yaml"`
 }
 
 func (cmd *UpdateConfigCmd) Validate(logger log.Logger) errs.ValidateErrors {
 	ves := make(errs.ValidateErrors, 0)
+	if cmd.ZoneId = strings.TrimSpace(cmd.ZoneId); cmd.ZoneId == "" {
+		ves = append(ves, "ZoneId must not be blank")
+	}
 	if strings.TrimSpace(cmd.Yaml) == "" {
 		ves = append(ves, "Yaml must not be blank")
 	}
@@ -65,8 +69,13 @@ func (cmd *UpdateConfigCmd) ParseConfig() (*bbconfig.Config, error) {
 type SidecarService interface {
 	// UpdateConfigReload 更新 Prometheus 配置文件，并且指示 Prometheus reload
 	UpdateConfigReload(ctx context.Context, cmd *UpdateConfigCmd, reloadCh chan chan error) error
-	// GetLastUpdateTs 获得上一次更新配置文件的时间
-	GetLastUpdateTs() time.Time
+	// GetRuntimeInfo 获得上一次更新配置文件的时间，以及绑定的 ZoneId
+	GetRuntimeInfo() *Runtimeinfo
+	// ResetConfigReload 重置 --custom.config.file 配置文件的内容
+	//  解绑 ZoneId
+	//  清空 “配置变更时间戳”
+	//  指示 Snmp Exporter reload
+	ResetConfigReload(ctx context.Context, zoneId string, reloadCh chan chan error) error
 }
 
 func New(logger log.Logger, configFile string) SidecarService {
@@ -80,16 +89,43 @@ func New(logger log.Logger, configFile string) SidecarService {
 }
 
 type sidecarService struct {
-	logger       log.Logger
-	configFile   string
-	lock         sync.Mutex
+	logger     log.Logger
+	configFile string
+
+	runtimeLock  sync.Mutex
+	boundZoneId  string    // 当前所绑定的 zoneId
 	lastUpdateTs time.Time // 上一次更新配置文件的时间戳
 }
 
-func (s *sidecarService) GetLastUpdateTs() time.Time {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	return s.lastUpdateTs
+const (
+	brand = "blackbox-exporter-mod"
+)
+
+type Runtimeinfo struct {
+	Brand        string    `json:"brand"`
+	ZoneId       string    `json:"zone_id"`
+	LastUpdateTs time.Time `json:"last_update_ts"`
+}
+
+func (r *Runtimeinfo) MarshalJSON() ([]byte, error) {
+	if r == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(map[string]interface{}{
+		"brand":          r.Brand,
+		"zone_id":        r.ZoneId,
+		"last_update_ts": r.LastUpdateTs.UnixMilli(),
+	})
+}
+
+func (s *sidecarService) GetRuntimeInfo() *Runtimeinfo {
+	s.runtimeLock.Lock()
+	defer s.runtimeLock.Unlock()
+	return &Runtimeinfo{
+		Brand:        brand,
+		ZoneId:       s.boundZoneId,
+		LastUpdateTs: s.lastUpdateTs,
+	}
 }
 
 func (s *sidecarService) UpdateConfigReload(ctx context.Context, cmd *UpdateConfigCmd, reloadCh chan chan error) error {
@@ -98,26 +134,33 @@ func (s *sidecarService) UpdateConfigReload(ctx context.Context, cmd *UpdateConf
 		return verrs
 	}
 
-	s.lock.Lock()
-	defer s.lock.Unlock()
+	s.runtimeLock.Lock()
+	defer s.runtimeLock.Unlock()
+
+	if err := s.assertZoneIdMatch(cmd.ZoneId); err != nil {
+		return err
+	}
+
+	cfgFileUtil := &configFileUtil{configFile: s.configFile}
 
 	var reloadErr error
 	defer func() {
 		if reloadErr == nil {
 			s.lastUpdateTs = time.Now()
+			s.bindZoneId(cmd.ZoneId)
 			// 没有出错
-			s.printErr(s.cleanBackupPromConfigFile())
+			s.printErr(cfgFileUtil.cleanBackupConfigFile())
 		} else {
 			// 出错了
-			s.printErr(s.restorePromConfigFile())
+			s.printErr(cfgFileUtil.restoreConfigFile())
 		}
 	}()
 
-	if reloadErr = s.backupPromConfigFile(); reloadErr != nil {
+	if reloadErr = cfgFileUtil.backupConfigFile(); reloadErr != nil {
 		return reloadErr
 	}
 	// 更新配置文件
-	if reloadErr = s.writeConfigFile(cmd.Yaml); reloadErr != nil {
+	if reloadErr = cfgFileUtil.writeConfigFile(cmd.Yaml); reloadErr != nil {
 		// 恢复旧文件
 		return reloadErr
 	}
@@ -127,32 +170,68 @@ func (s *sidecarService) UpdateConfigReload(ctx context.Context, cmd *UpdateConf
 	return reloadErr
 }
 
-func (s *sidecarService) readConfigFile() (string, error) {
-	configYamlB, err := os.ReadFile(s.configFile)
-	if err != nil {
-		return "", errors.Wrapf(err, "Write config file %q failed", s.configFile)
+func (s *sidecarService) ResetConfigReload(ctx context.Context, zoneId string, reloadCh chan chan error) error {
+	s.runtimeLock.Lock()
+	defer s.runtimeLock.Unlock()
+
+	if zoneId = strings.TrimSpace(zoneId); zoneId == "" {
+		return errs.ValidateError("ZoneId must not be blank")
 	}
-	return string(configYamlB), nil
+
+	if err := s.assertZoneIdMatch(zoneId); err != nil {
+		return err
+	}
+
+	cfgFileUtil := &configFileUtil{configFile: s.configFile}
+
+	var reloadErr error
+
+	defer func() {
+		if reloadErr == nil {
+			s.lastUpdateTs = time.Time{}
+			s.bindZoneId("")
+			// 没有出错
+			s.printErr(cfgFileUtil.cleanBackupConfigFile())
+		} else {
+			// 出错了
+			s.printErr(cfgFileUtil.restoreConfigFile())
+		}
+	}()
+	if reloadErr = cfgFileUtil.backupConfigFile(); reloadErr != nil {
+		return reloadErr
+	}
+
+	// 更新配置文件为空文件
+	emptyCfg := &bbconfig.Config{}
+	emptyCfgYamlB, err := json.Marshal(emptyCfg)
+	if err != nil {
+		reloadErr = err
+		return err
+	}
+	if reloadErr = cfgFileUtil.writeConfigFile(string(emptyCfgYamlB)); reloadErr != nil {
+		// 恢复旧文件
+		return reloadErr
+	}
+
+	// 指示 Prometheus reload 配置文件
+	reloadErr = s.doReload(reloadCh)
+	return reloadErr
 }
 
-func (s *sidecarService) writeConfigFile(configYaml string) error {
-	err := os.WriteFile(s.configFile, []byte(configYaml), 0o644)
-	if err != nil {
-		return errors.Wrapf(err, "Write config file %q failed", s.configFile)
+func (s *sidecarService) assertZoneIdMatch(zoneId string) error {
+	if s.boundZoneId == "" {
+		// 这个 prometheus 还没有和 zone 绑定过
+		return nil
+	}
+	if s.boundZoneId != zoneId {
+		return errs.ValidateErrorf("Current blackbox-exporter bound zoneId=%s, command zoneId=%s, mismatch",
+			s.boundZoneId, zoneId)
 	}
 	return nil
 }
 
-func (s *sidecarService) backupPromConfigFile() error {
-	return fsutil.BackupFile(s.configFile)
-}
-
-func (s *sidecarService) cleanBackupPromConfigFile() error {
-	return fsutil.CleanBackupFile(s.configFile)
-}
-
-func (s *sidecarService) restorePromConfigFile() error {
-	return fsutil.RestoreFile(s.configFile)
+func (s *sidecarService) bindZoneId(zoneId string) {
+	s.boundZoneId = zoneId
 }
 
 func (s *sidecarService) printErr(err error) {

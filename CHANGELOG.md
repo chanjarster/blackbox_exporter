@@ -1,4 +1,8 @@
-## 0.24.0-mod.1 / 2023-05-16
+## 0.24.0-mod.2 / 2023-12-13
+
+* [CHANGE] Add enhanced management API
+* 
+## 0.24.0-mod.1 / 2023-11-07
 
 * [CHANGE] Add enhanced management API
 

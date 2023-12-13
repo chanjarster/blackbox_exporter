@@ -243,8 +243,9 @@ func run() int {
 	// EXTENSION: sidecar API
 	sidecarSvc := sidecar.New(log.With(logger, "component", "sidecar"), *configFile)
 	sidecarHandler := bbweb.NewSidecarHandler(log.With(logger, "handler", "sidecar"), sidecarSvc, reloadCh)
-	http.HandleFunc(path.Join(*routePrefix, "/-/sidecar/config"), sidecarHandler.UpdateConfig)
-	http.HandleFunc(path.Join(*routePrefix, "/-/sidecar/last-update-ts"), sidecarHandler.GetLastUpdateTs)
+	http.HandleFunc(path.Join(*routePrefix, "/-/sidecar/config"), sidecarHandler.UpdateConfig())
+	http.HandleFunc(path.Join(*routePrefix, "/-/sidecar/runtimeinfo"), sidecarHandler.GetRuntimeInfo())
+	http.HandleFunc(path.Join(*routePrefix, "/-/sidecar/reset-config"), sidecarHandler.ResetConfig())
 
 	srv := &http.Server{}
 	srvc := make(chan struct{})
